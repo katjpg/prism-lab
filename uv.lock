@@ -952,6 +952,7 @@ dependencies = [
     { name = "pillow" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 
 [package.dev-dependencies]
@@ -970,6 +971,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "scikit-learn", specifier = ">=1.9.0" },
+    { name = "scipy", specifier = ">=1.17.1" },
 ]
 
 [package.metadata.requires-dev]
