@@ -8,17 +8,17 @@ import numpy as np
 from skimage.color import lab2rgb, rgb2lab
 from sklearn.cluster import KMeans
 
-from prism.color.value import EPS, SEED_DEFAULT, ValueResult, check_rgb
+from prism.color.value import EPS, DEFAULT_SEED, ValueResult, check_rgb
 
 
 PaletteTone = Literal["shadow", "midtone", "highlight"]
 
-N_COLORS_DEFAULT = 8
-N_SAMPLES_DEFAULT = 20_000
+DEFAULT_N_COLORS = 8
+DEFAULT_N_SAMPLES = 20_000
 
 # L* is on a scale of 0-100, where black = 0 and white = 100
-L_SHADOW_MAX = 33.0
-L_HIGHLIGHT_MIN = 66.0
+SHADOW_L_MAX = 33.0
+HIGHLIGHT_L_MIN = 66.0
 
 
 @dataclass
@@ -30,9 +30,9 @@ class PaletteColor:
     @property
     def tone(self) -> PaletteTone:
         L = self.lab[0]
-        if L < L_SHADOW_MAX:
+        if L < SHADOW_L_MAX:
             return "shadow"
-        if L < L_HIGHLIGHT_MIN:
+        if L < HIGHLIGHT_L_MIN:
             return "midtone"
         return "highlight"
 
@@ -45,9 +45,9 @@ class Palette:
     def extract(
         cls,
         rgb: np.ndarray,
-        n_colors: int = N_COLORS_DEFAULT,
-        n_samples: int = N_SAMPLES_DEFAULT,
-        seed: int = SEED_DEFAULT,
+        n_colors: int = DEFAULT_N_COLORS,
+        n_samples: int = DEFAULT_N_SAMPLES,
+        seed: int = DEFAULT_SEED,
     ) -> Palette:
         check_rgb(rgb)
 
@@ -96,7 +96,7 @@ class Palette:
 def sample_rows(
     X: np.ndarray,
     n: int,
-    seed: int = SEED_DEFAULT,
+    seed: int = DEFAULT_SEED,
 ) -> np.ndarray:
     if len(X) <= n:
         return X

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from prism.color.value import EPS, SEED_DEFAULT, Value
+from prism.color.value import EPS, DEFAULT_SEED, Value
 
 
 @dataclass
@@ -75,7 +75,7 @@ def quantize_value(
     rgb: np.ndarray,
     n_bands: int = 5,
     smooth: float = 0.25,
-    seed: int = SEED_DEFAULT,
+    seed: int = DEFAULT_SEED,
 ) -> ValueMap:
     result = Value(
         n_bands=n_bands,

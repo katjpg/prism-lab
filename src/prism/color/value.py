@@ -11,28 +11,28 @@ from sklearn.cluster import KMeans
 
 ValueMethod = Literal["multiotsu", "kmeans", "percentile"]
 
-SEED_DEFAULT = 7
-N_BANDS_DEFAULT = 5
+DEFAULT_SEED = 7
+DEFAULT_N_BANDS = 5
 
 EPS = 1e-6
 
 # approximate perceived-value for saturated colors.
-# V = L + W_CHROMA * C
-W_CHROMA = 0.16
+# V = L + CHROMA_WEIGHT * C
+CHROMA_WEIGHT = 0.16
 
 # bilateral filter parameters
-SIGMA_COLOR = 0.10
-SIGMA_SPACE = 4.0
+BILATERAL_SIGMA_COLOR = 0.10
+BILATERAL_SIGMA_SPACE = 4.0
 
 # multilevel otsu.
-N_BINS_OTSU = 64
+OTSU_N_BINS = 64
 
 # illumination correction
 ILLUM_SIGMA_FRAC = 0.08
 ILLUM_STRENGTH = 0.50
 
 # connected-component despeckling parameters
-SPECKLE_AREA_MIN = 64
+MIN_SPECKLE_AREA_PX = 64
 SPECKLE_AREA_FRAC = 0.001
 
 
@@ -50,12 +50,12 @@ class ValueResult:
 
 @dataclass
 class Value:
-    n_bands: int = N_BANDS_DEFAULT
+    n_bands: int = DEFAULT_N_BANDS
     method: ValueMethod = "multiotsu"
     chroma: bool = True
     smooth: bool = True
     flatten: bool = False
-    seed: int = SEED_DEFAULT
+    seed: int = DEFAULT_SEED
 
     def extract(self, rgb: np.ndarray) -> ValueResult:
         check_rgb(rgb)
@@ -136,7 +136,7 @@ def lab_chroma(rgb: np.ndarray) -> np.ndarray:
 def perceived_value(
     L: np.ndarray,
     C: np.ndarray,
-    w_chroma: float = W_CHROMA,
+    w_chroma: float = CHROMA_WEIGHT,
 ) -> np.ndarray:
     V = L + w_chroma * C
     return np.clip(V, 0.0, 1.0).astype("float32")
@@ -144,7 +144,7 @@ def perceived_value(
 
 def value_channel(
     rgb: np.ndarray,
-    w_chroma: float = W_CHROMA,
+    w_chroma: float = CHROMA_WEIGHT,
 ) -> np.ndarray:
     L, C = lab_channels(rgb)
     return perceived_value(L, C, w_chroma=w_chroma)
@@ -152,8 +152,8 @@ def value_channel(
 
 def bilateral_smooth(
     X: np.ndarray,
-    sigma_color: float = SIGMA_COLOR,
-    sigma_space: float = SIGMA_SPACE,
+    sigma_color: float = BILATERAL_SIGMA_COLOR,
+    sigma_space: float = BILATERAL_SIGMA_SPACE,
 ) -> np.ndarray:
     d = int(2 * round(sigma_space) + 1)
 
@@ -187,7 +187,7 @@ def flatten_illumination(
 def quantize_multiotsu(
     X: np.ndarray,
     n_bands: int,
-    n_bins: int = N_BINS_OTSU,
+    n_bins: int = OTSU_N_BINS,
 ) -> np.ndarray:
     for k in range(max(2, n_bands), 1, -1):
         try:
@@ -203,7 +203,7 @@ def quantize_multiotsu(
 def quantize_kmeans(
     X: np.ndarray,
     n_bands: int,
-    seed: int = SEED_DEFAULT,
+    seed: int = DEFAULT_SEED,
 ) -> np.ndarray:
     q = np.unique((X * 255).astype("uint8"))
     k = min(max(1, n_bands), len(q))
@@ -259,7 +259,7 @@ def sort_labels(
 
 def despeckle(
     labels: np.ndarray,
-    area_min: int = SPECKLE_AREA_MIN,
+    area_min: int = MIN_SPECKLE_AREA_PX,
     area_frac: float = SPECKLE_AREA_FRAC,
     kernel: int = 7,
 ) -> np.ndarray:
