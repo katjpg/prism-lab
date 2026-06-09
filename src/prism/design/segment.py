@@ -15,6 +15,7 @@ from prism.design.paint import (
     adjust_saturation,
     apply_bristle_stroke,
     check_rgb,
+    dehaze,
     initial_canvas,
     resize_max_side,
     scale_strokes,
@@ -204,8 +205,12 @@ def paint_segments(
         image = canvas.astype("float32")
         out_strokes = strokes
 
+    image = np.clip(image, 0.0, 1.0).astype("float32")
+    if background == "white":
+        image = dehaze(image)
+
     return PaintResult(
-        image=np.clip(image, 0.0, 1.0).astype("float32"),
+        image=image,
         strokes=out_strokes,
         style="acrylic",
         config=config,  # type: ignore[arg-type]

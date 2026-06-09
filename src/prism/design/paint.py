@@ -62,7 +62,7 @@ def paint(
     canvas = initial_canvas(source, _cfg(cfg, "background", "mean"))
     strokes: list[BrushStroke] = []
 
-    brush_cache: dict[int, Brush] = {}
+    brush_cache: dict[object, Brush] = {}
 
     for radius in cfg.radii:
         ref = blurred_reference(source, radius, _cfg(cfg, "blur_factor", 0.5))
@@ -102,12 +102,26 @@ def paint(
         image = canvas.astype("float32")
         out_strokes = strokes
 
+    image = np.clip(image, 0.0, 1.0).astype("float32")
+    if _cfg(cfg, "background", "mean") == "white":
+        image = dehaze(image)
+
     return PaintResult(
-        image=np.clip(image, 0.0, 1.0).astype("float32"),
+        image=image,
         strokes=out_strokes,
         style=style,
         config=cfg,
     )
+
+
+def dehaze(
+    image: np.ndarray,
+    white_point: float = 0.85,
+    soft: float = 0.10,
+) -> np.ndarray:
+    mn = image.min(axis=2)
+    t = np.clip((mn - white_point) / max(soft, EPS), 0.0, 1.0)[..., None]
+    return (image * (1.0 - t) + t).astype("float32")
 
 
 def check_rgb(rgb: np.ndarray) -> None:
@@ -387,7 +401,7 @@ def apply_stroke(
     canvas: np.ndarray,
     stroke: BrushStroke,
     config: PaintConfig,
-    brush_cache: dict[int, Brush],
+    brush_cache: dict[object, Brush],
     seed: int,
 ) -> None:
     brush_type = _cfg(config, "brush", "simple")
