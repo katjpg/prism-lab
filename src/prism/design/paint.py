@@ -6,11 +6,14 @@ import cv2
 import numpy as np
 
 from prism.color.value import DEFAULT_SEED, value_channel
+from prism.design.brush import Brush, apply_brushstroke, make_brush
 from prism.design.style import PaintConfig, PainterlyStyle, style_config
 
 
 DEFAULT_WORK_MAX_SIDE = 700
 EPS = 1e-8
+
+_STROKES = ("round", "flat", "filbert")
 
 
 @dataclass
@@ -35,21 +38,34 @@ def paint(
     style: PainterlyStyle = "impressionist",
     config: PaintConfig | None = None,
     work_size: int = DEFAULT_WORK_MAX_SIDE,
+    pad: float = 0.06,
     seed: int = DEFAULT_SEED,
 ) -> PaintResult:
     check_rgb(rgb)
+
+    if style == "acrylic" and config is None:
+        from prism.design.segment import paint_segments
+
+        return paint_segments(rgb, work_size=work_size, pad=pad, seed=seed)
+
+    if pad > 0:
+        p = int(round(pad * max(rgb.shape[:2])))
+        if p > 0:
+            rgb = np.pad(rgb, ((p, p), (p, p), (0, 0)), constant_values=1.0)
 
     cfg = style_config(style) if config is None else config
     rng = np.random.default_rng(seed)
 
     source, scale = resize_max_side(rgb, work_size)
-    source = adjust_saturation(source, cfg.saturation)
+    source = adjust_saturation(source, _cfg(cfg, "saturation", 1.0))
 
-    canvas = initial_canvas(source, cfg.background)
+    canvas = initial_canvas(source, _cfg(cfg, "background", "mean"))
     strokes: list[BrushStroke] = []
 
+    brush_cache: dict[int, Brush] = {}
+
     for radius in cfg.radii:
-        ref = blurred_reference(source, radius, cfg.blur_factor)
+        ref = blurred_reference(source, radius, _cfg(cfg, "blur_factor", 0.5))
         theta = orientation_map(ref)
 
         layer = make_layer_strokes(
@@ -63,8 +79,14 @@ def paint(
 
         rng.shuffle(layer)
 
-        for stroke in layer:
-            apply_stroke(canvas, stroke)
+        for j, stroke in enumerate(layer):
+            apply_stroke(
+                canvas=canvas,
+                stroke=stroke,
+                config=cfg,
+                brush_cache=brush_cache,
+                seed=seed + 10_000 * int(radius) + j,
+            )
             strokes.append(stroke)
 
     h0, w0 = rgb.shape[:2]
@@ -195,7 +217,7 @@ def make_layer_strokes(
 ) -> list[BrushStroke]:
     error = color_error(reference, canvas)
     h, w = error.shape
-    step = max(1, round(config.grid_factor * radius))
+    step = max(1, round(_cfg(config, "grid_factor", 1.0) * radius))
 
     strokes: list[BrushStroke] = []
 
@@ -364,11 +386,109 @@ def sample_angle(
 def apply_stroke(
     canvas: np.ndarray,
     stroke: BrushStroke,
+    config: PaintConfig,
+    brush_cache: dict[int, Brush],
+    seed: int,
 ) -> None:
+    brush_type = _cfg(config, "brush", "simple")
+
+    if brush_type == "bristle" and len(stroke.path) > 1:
+        apply_bristle_stroke(
+            canvas=canvas,
+            stroke=stroke,
+            config=config,
+            brush_cache=brush_cache,
+            seed=seed,
+        )
+        return
+
     if len(stroke.path) == 1:
         apply_dot(canvas, stroke)
     else:
         apply_polyline(canvas, stroke)
+
+
+def apply_bristle_stroke(
+    canvas: np.ndarray,
+    stroke: BrushStroke,
+    config: PaintConfig,
+    brush_cache: dict[object, Brush],
+    seed: int,
+) -> None:
+    vary = int(_cfg(config, "bristle_vary", 0))
+    radius_round = max(1, int(round(stroke.radius)))
+
+    if vary > 0:
+        bucket = (seed // 7) % vary
+        key: object = (radius_round, bucket)
+    else:
+        bucket = -1
+        key = radius_round
+
+    brush = brush_cache.get(key)
+    if brush is None:
+        if vary > 0:
+            vr = np.random.default_rng(10_000 + bucket)
+            rad = max(1.5, float(stroke.radius) * float(vr.uniform(0.8, 1.25)))
+            cmin = max(4, int(round(stroke.radius * 2.0)))
+            cmax = max(cmin + 4, int(round(stroke.radius * 5.0)))
+            n_bristles = int(vr.integers(cmin, cmax + 1))
+            shape = _STROKES[bucket % len(_STROKES)]
+            brush_seed = 50_000 + bucket
+        else:
+            rad = float(stroke.radius)
+            n_bristles = int(_cfg(config, "bristle_count", 48))
+            shape = _cfg(config, "brush_shape", "filbert")
+            brush_seed = seed
+
+        brush = make_brush(
+            radius=rad,
+            n_bristles=n_bristles,
+            shape=shape,
+            seed=brush_seed,
+            L_rng=_cfg(config, "bristle_length", (1.2, 2.2)),
+            rho_rng=_cfg(config, "bristle_rigidity", (0.10, 0.28)),
+            r_rng=_cfg(config, "bristle_width", (0.7, 1.8)),
+            a_rng=_cfg(config, "bristle_alpha", (0.55, 1.00)),
+            eta_rng=_cfg(config, "bristle_memory", (0.02, 0.16)),
+        )
+        brush_cache[key] = brush
+
+    path = np.asarray(stroke.path, dtype="float32")
+    color = np.asarray(stroke.color, dtype="float32")
+
+    h, w = canvas.shape[:2]
+    reach = float(brush.L.max() + np.abs(brush.xy).max() + brush.r.max()) + 2.0
+    pad = int(np.ceil(reach))
+
+    x0 = max(0, int(np.floor(float(path[:, 0].min()))) - pad)
+    x1 = min(w, int(np.ceil(float(path[:, 0].max()))) + pad + 1)
+    y0 = max(0, int(np.floor(float(path[:, 1].min()))) - pad)
+    y1 = min(h, int(np.ceil(float(path[:, 1].max()))) + pad + 1)
+
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    sub = canvas[y0:y1, x0:x1]
+    local_path = path - np.array([x0, y0], dtype="float32")
+
+    out, _ = apply_brushstroke(
+        canvas=sub,
+        path=local_path,
+        color=color,
+        brush=brush,
+        alpha=float(_cfg(config, "paint_opacity", stroke.alpha)),
+        step=float(_cfg(config, "brush_step", 1.5)),
+        samples=int(_cfg(config, "brush_samples", 12)),
+        drag=float(_cfg(config, "brush_drag", 0.08)),
+        dryness=float(_cfg(config, "dryness", 0.18)),
+        grain=float(_cfg(config, "grain", 0.12)),
+        rotate=bool(_cfg(config, "rotate_brush", False)),
+        render=_cfg(config, "bristle_render", "splat"),
+        seed=seed,
+    )
+
+    canvas[y0:y1, x0:x1] = out
 
 
 def apply_dot(
@@ -390,6 +510,7 @@ def apply_dot(
         return
 
     mask = np.zeros((y1 - y0, x1 - x0), dtype="uint8")
+
     cv2.circle(
         mask,
         center=(cx - x0, cy - y0),
@@ -426,6 +547,7 @@ def apply_polyline(
 
     mask = np.zeros((y1 - y0, x1 - x0), dtype="uint8")
     local = pts.round().astype("int32") - np.array([x0, y0], dtype="int32")
+
     cv2.polylines(
         mask,
         [local],
@@ -479,10 +601,19 @@ def scale_strokes(
     return out
 
 
+def _cfg(
+    config: PaintConfig,
+    name: str,
+    default,
+):
+    return getattr(config, name, default)
+
+
 __all__ = [
     "BrushStroke",
     "PaintResult",
     "adjust_saturation",
+    "apply_bristle_stroke",
     "blurred_reference",
     "color_error",
     "curved_path",
