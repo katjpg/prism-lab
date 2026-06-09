@@ -5,6 +5,7 @@ from typing import Literal
 
 import cv2
 import numpy as np
+from numba import njit
 
 
 ShapeFamily = Literal[
@@ -23,25 +24,25 @@ _SHAPE_PRESETS: dict[str, tuple[str, ...]] = {
     "combo": ("ellipse", "rectangle", "triangle", "polygon"),
 }
 
-SEED_DEFAULT = 7
+DEFAULT_SEED = 7
 EPS = 1e-6
 
-WORK_SIZE = 200
+WORK_MAX_SIDE = 200
 
-N_RANDOM = 48
-MAX_AGE = 24
-EFFORT_LO = 0.45
+N_RANDOM_SAMPLES = 48
+MAX_STALE_ITERS = 24
+MIN_EFFORT_SCALE = 0.45
 
-MUT_SIGMA_FRAC = 0.06
-SIZE_HI = 0.42
-SIZE_LO = 0.035
-SIZE_GAMMA = 1.5
-MIN_FRAC_AXIS = 0.008
+MUTATION_SIGMA_FRAC = 0.06
+MAX_SIZE_FRAC = 0.42
+MIN_SIZE_FRAC = 0.035
+SIZE_SCHEDULE_GAMMA = 1.5
+MIN_AXIS_FRAC = 0.008
 MIN_AREA_PX = 8
-POLYGON_SIDES = 5
+N_POLYGON_SIDES = 5
 
-GUIDE_INTERVAL = 4
-GUIDE_POOL = 4096
+GUIDE_REFRESH_INTERVAL = 4
+GUIDE_POOL_SIZE = 4096
 MIN_IMPROVEMENT = 1e-7
 PATIENCE = 12
 
@@ -73,10 +74,10 @@ def fit_primitives(
     edge_weight: float = 0.5,
     residual_weight: float = 1.0,
     alpha: float = 0.6,
-    work_size: int = WORK_SIZE,
-    effort_lo: float = EFFORT_LO,
+    work_size: int = WORK_MAX_SIDE,
+    effort_lo: float = MIN_EFFORT_SCALE,
     snapshots: tuple[int, ...] = (),
-    seed: int = SEED_DEFAULT,
+    seed: int = DEFAULT_SEED,
 ) -> PrimitiveFit:
     rng = np.random.default_rng(seed)
 
@@ -115,7 +116,7 @@ def fit_primitives(
     for i in range(n_shapes):
         if pool is None or i % _guide_interval(i, n_shapes) == 0:
             guide = residual_weight * residual_guide(t, current) + edge
-            pool = guide_pool(guide, n=GUIDE_POOL)
+            pool = guide_pool(guide, n=GUIDE_POOL_SIZE)
 
         sf = _size_frac(i, n_shapes)
         restarts, n_random, max_age = _search_budget(
@@ -156,7 +157,7 @@ def fit_primitives(
         else:
             stale = 0
 
-        _commit_shape(current, ys, xs, fill, alpha)
+        apply_shape_fill(current, ys, xs, fill, alpha)
 
         out_fill = (
             float(fill) if n_ch == 1 else tuple(float(v) for v in np.asarray(fill))
@@ -248,7 +249,7 @@ def residual_guide(target: np.ndarray, current: np.ndarray) -> np.ndarray:
 
 def guide_pool(
     guide: np.ndarray,
-    n: int = GUIDE_POOL,
+    n: int = GUIDE_POOL_SIZE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     flat = guide.ravel().astype("float64")
     n = min(n, flat.size)
@@ -291,7 +292,7 @@ def propose_shape(
     families: tuple[str, ...],
 ) -> tuple[str, tuple[float, ...]]:
     kind = families[int(rng.integers(len(families)))]
-    lo = MIN_FRAC_AXIS * diag
+    lo = MIN_AXIS_FRAC * diag
     hi = sf * diag
 
     if kind == "ellipse":
@@ -326,8 +327,8 @@ def propose_shape(
     base = float(rng.uniform(0, 2 * np.pi))
     g = []
 
-    for k in range(POLYGON_SIDES):
-        a = base + 2 * np.pi * k / POLYGON_SIDES + float(rng.uniform(-0.3, 0.3))
+    for k in range(N_POLYGON_SIDES):
+        a = base + 2 * np.pi * k / N_POLYGON_SIDES + float(rng.uniform(-0.3, 0.3))
         r = float(rng.uniform(lo, hi)) * float(rng.uniform(0.6, 1.0))
         g.extend([cx + r * float(np.cos(a)), cy + r * float(np.sin(a))])
 
@@ -341,7 +342,7 @@ def mutate_shape(
     diag: float,
 ) -> tuple[str, tuple[float, ...]]:
     g = list(geom)
-    step = MUT_SIGMA_FRAC * diag
+    step = MUTATION_SIGMA_FRAC * diag
 
     if kind in ("ellipse", "rectangle"):
         g[0] += float(rng.normal(0, step))
@@ -406,21 +407,85 @@ def rasterize_shape(
     return _fill_poly(pts, shape_hw, convex=False)
 
 
-def optimal_fill(
+@njit(cache=True, nogil=True)
+def _score_gray(
     target: np.ndarray,
     current: np.ndarray,
     ys: np.ndarray,
     xs: np.ndarray,
     alpha: float,
-) -> np.ndarray:
-    seg = target[ys, xs]
-    cur = current[ys, xs]
+):
+    n = len(ys)
 
-    if alpha >= 1.0:
-        return seg.mean(axis=0)
+    t_sum = 0.0
+    c_sum = 0.0
+    for i in range(n):
+        t_sum += target[ys[i], xs[i]]
+        c_sum += current[ys[i], xs[i]]
 
-    fill = cur.mean(axis=0) + (seg - cur).mean(axis=0) / alpha
-    return np.clip(fill, 0.0, 1.0)
+    t_mean = t_sum / n
+    c_mean = c_sum / n
+    fill = t_mean if alpha >= 1.0 else c_mean + (t_mean - c_mean) / alpha
+    if fill < 0.0:
+        fill = 0.0
+    elif fill > 1.0:
+        fill = 1.0
+
+    old_err = 0.0
+    new_err = 0.0
+    for i in range(n):
+        t = target[ys[i], xs[i]]
+        c = current[ys[i], xs[i]]
+        new = fill if alpha >= 1.0 else (1.0 - alpha) * c + alpha * fill
+        old_d = t - c
+        new_d = t - new
+        old_err += old_d * old_d
+        new_err += new_d * new_d
+
+    return new_err - old_err, fill
+
+
+@njit(cache=True, nogil=True)
+def _score_rgb(
+    target: np.ndarray,
+    current: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    alpha: float,
+):
+    n = len(ys)
+
+    t = np.zeros(3)
+    c = np.zeros(3)
+    for i in range(n):
+        for k in range(3):
+            t[k] += target[ys[i], xs[i], k]
+            c[k] += current[ys[i], xs[i], k]
+
+    fill = np.empty(3)
+    for k in range(3):
+        tm = t[k] / n
+        cm = c[k] / n
+        f = tm if alpha >= 1.0 else cm + (tm - cm) / alpha
+        if f < 0.0:
+            f = 0.0
+        elif f > 1.0:
+            f = 1.0
+        fill[k] = f
+
+    old_err = 0.0
+    new_err = 0.0
+    for i in range(n):
+        for k in range(3):
+            tv = target[ys[i], xs[i], k]
+            cv = current[ys[i], xs[i], k]
+            new = fill[k] if alpha >= 1.0 else (1.0 - alpha) * cv + alpha * fill[k]
+            old_d = tv - cv
+            new_d = tv - new
+            old_err += old_d * old_d
+            new_err += new_d * new_d
+
+    return new_err - old_err, fill[0], fill[1], fill[2]
 
 
 def score_shape(
@@ -429,18 +494,13 @@ def score_shape(
     ys: np.ndarray,
     xs: np.ndarray,
     alpha: float,
-) -> tuple[float, np.ndarray]:
-    seg = target[ys, xs]
-    cur = current[ys, xs]
-    fill = optimal_fill(target, current, ys, xs, alpha)
+) -> tuple[float, float | np.ndarray]:
+    if target.ndim == 2:
+        delta, fill = _score_gray(target, current, ys, xs, alpha)
+        return float(delta), float(fill)
 
-    if alpha >= 1.0:
-        new = fill
-    else:
-        new = (1.0 - alpha) * cur + alpha * fill
-
-    delta = float(((seg - new) ** 2).sum() - ((seg - cur) ** 2).sum())
-    return delta, fill
+    delta, r, g, b = _score_rgb(target, current, ys, xs, alpha)
+    return float(delta), np.array((r, g, b), dtype="float32")
 
 
 def evaluate_shape(
@@ -450,7 +510,10 @@ def evaluate_shape(
     geom: tuple[float, ...],
     shape_hw: tuple[int, int],
     alpha: float,
-) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, str, tuple[float, ...]] | None:
+) -> (
+    tuple[float, float | np.ndarray, np.ndarray, np.ndarray, str, tuple[float, ...]]
+    | None
+):
     ys, xs = rasterize_shape(kind, geom, shape_hw)
 
     if len(ys) < MIN_AREA_PX:
@@ -474,7 +537,10 @@ def _best_shape(
     restarts: int,
     n_random: int,
     max_age: int,
-) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, str, tuple[float, ...]] | None:
+) -> (
+    tuple[float, float | np.ndarray, np.ndarray, np.ndarray, str, tuple[float, ...]]
+    | None
+):
     best = None
 
     for _ in range(restarts):
@@ -538,17 +604,58 @@ def _fill_poly(
     return ys + y0, xs + x0
 
 
-def _commit_shape(
+@njit(cache=True, nogil=True)
+def apply_fill_gray(
     current: np.ndarray,
     ys: np.ndarray,
     xs: np.ndarray,
-    fill: np.ndarray,
+    fill: float,
     alpha: float,
 ) -> None:
-    if alpha >= 1.0:
-        current[ys, xs] = fill
+    for i in range(len(ys)):
+        y = ys[i]
+        x = xs[i]
+        if alpha >= 1.0:
+            current[y, x] = fill
+        else:
+            current[y, x] = (1.0 - alpha) * current[y, x] + alpha * fill
+
+
+@njit(cache=True, nogil=True)
+def apply_fill_rgb(
+    current: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    r: float,
+    g: float,
+    b: float,
+    alpha: float,
+) -> None:
+    for i in range(len(ys)):
+        y = ys[i]
+        x = xs[i]
+        if alpha >= 1.0:
+            current[y, x, 0] = r
+            current[y, x, 1] = g
+            current[y, x, 2] = b
+        else:
+            current[y, x, 0] = (1.0 - alpha) * current[y, x, 0] + alpha * r
+            current[y, x, 1] = (1.0 - alpha) * current[y, x, 1] + alpha * g
+            current[y, x, 2] = (1.0 - alpha) * current[y, x, 2] + alpha * b
+
+
+def apply_shape_fill(
+    current: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    fill: float | np.ndarray,
+    alpha: float,
+) -> None:
+    if current.ndim == 2:
+        apply_fill_gray(current, ys, xs, float(fill), alpha)
     else:
-        current[ys, xs] = (1.0 - alpha) * current[ys, xs] + alpha * fill
+        f = np.asarray(fill, dtype="float32")
+        apply_fill_rgb(current, ys, xs, float(f[0]), float(f[1]), float(f[2]), alpha)
 
 
 def _scaled_geom(
@@ -571,7 +678,10 @@ def _families(shape_family: ShapeFamily) -> tuple[str, ...]:
 
 
 def _size_frac(i: int, n: int) -> float:
-    return SIZE_HI + (SIZE_LO - SIZE_HI) * (i / max(n - 1, 1)) ** SIZE_GAMMA
+    return (
+        MAX_SIZE_FRAC
+        + (MIN_SIZE_FRAC - MAX_SIZE_FRAC) * (i / max(n - 1, 1)) ** SIZE_SCHEDULE_GAMMA
+    )
 
 
 def _search_budget(
@@ -584,8 +694,8 @@ def _search_budget(
 
     return (
         max(1, round(starts * f)),
-        max(8, round(N_RANDOM * f)),
-        max(8, round(MAX_AGE * f)),
+        max(8, round(N_RANDOM_SAMPLES * f)),
+        max(8, round(MAX_STALE_ITERS * f)),
     )
 
 
@@ -596,4 +706,4 @@ def _guide_interval(i: int, n: int) -> int:
     if i >= int(n * 0.50):
         return 2
 
-    return GUIDE_INTERVAL
+    return GUIDE_REFRESH_INTERVAL
