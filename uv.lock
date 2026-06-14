@@ -943,7 +943,7 @@ wheels = [
 [[package]]
 name = "prism-lab"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
     { name = "numba" },
@@ -953,6 +953,7 @@ dependencies = [
     { name = "scikit-image" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "threadpoolctl" },
 ]
 
 [package.dev-dependencies]
@@ -972,6 +973,7 @@ requires-dist = [
     { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "scikit-learn", specifier = ">=1.9.0" },
     { name = "scipy", specifier = ">=1.17.1" },
+    { name = "threadpoolctl", specifier = ">=3.6.0" },
 ]
 
 [package.metadata.requires-dev]
