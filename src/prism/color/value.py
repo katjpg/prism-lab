@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal
 
@@ -7,7 +9,7 @@ from skimage.color import rgb2lab
 from skimage.filters import threshold_multiotsu
 from skimage.measure import label, regionprops
 from sklearn.cluster import KMeans
-
+from threadpoolctl import threadpool_limits
 
 ValueMethod = Literal["multiotsu", "kmeans", "percentile"]
 
@@ -41,7 +43,7 @@ class ValueResult:
     L: np.ndarray
     C: np.ndarray
     V: np.ndarray
-    X: np.ndarray
+    work: np.ndarray
     labels: np.ndarray
     scaffold: np.ndarray
     n_bands: int
@@ -63,28 +65,28 @@ class Value:
         L, C = lab_channels(rgb)
         V = perceived_value(L, C) if self.chroma else L
 
-        X = V.copy()
+        work = V.copy()
 
         if self.flatten:
-            X = flatten_illumination(X)
+            work = flatten_illumination(work)
 
         if self.smooth:
-            X = bilateral_smooth(X)
+            work = bilateral_smooth(work)
 
-        y = self._quantize(X)
-        y = sort_labels(y, X)
+        y = self._quantize(work)
+        y = sort_labels(y, work)
 
         y = despeckle(y)
-        y = sort_labels(y, X)
+        y = sort_labels(y, work)
 
         n = n_labels(y)
-        scaffold = label2gray(y, n)
+        scaffold = label_ramp(y, n)
 
         return ValueResult(
             L=L,
             C=C,
             V=V,
-            X=X,
+            work=work,
             labels=y,
             scaffold=scaffold,
             n_bands=n,
@@ -122,32 +124,38 @@ def lab_channels(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return L, C
 
 
-def lab_luminance(rgb: np.ndarray) -> np.ndarray:
-    lab = rgb2lab(rgb)
-    return (lab[..., 0] / 100.0).astype("float32")
-
-
-def lab_chroma(rgb: np.ndarray) -> np.ndarray:
-    lab = rgb2lab(rgb)
-    C = np.hypot(lab[..., 1], lab[..., 2])
-    return (C / 100.0).astype("float32")
-
-
 def perceived_value(
     L: np.ndarray,
     C: np.ndarray,
-    w_chroma: float = CHROMA_WEIGHT,
+    chroma_weight: float = CHROMA_WEIGHT,
 ) -> np.ndarray:
-    V = L + w_chroma * C
+    V = L + chroma_weight * C
     return np.clip(V, 0.0, 1.0).astype("float32")
 
 
 def value_channel(
     rgb: np.ndarray,
-    w_chroma: float = CHROMA_WEIGHT,
+    chroma_weight: float = CHROMA_WEIGHT,
 ) -> np.ndarray:
     L, C = lab_channels(rgb)
-    return perceived_value(L, C, w_chroma=w_chroma)
+    return perceived_value(L, C, chroma_weight=chroma_weight)
+
+
+def adjust_saturation(
+    rgb: np.ndarray,
+    saturation: float,
+) -> np.ndarray:
+    if abs(saturation - 1.0) < EPS:
+        return rgb.astype("float32")
+
+    hsv = cv2.cvtColor(rgb.astype("float32"), cv2.COLOR_RGB2HSV)
+    hsv[..., 1] = np.clip(hsv[..., 1] * saturation, 0.0, 1.0)
+
+    return np.clip(
+        cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB),
+        0.0,
+        1.0,
+    ).astype("float32")
 
 
 def bilateral_smooth(
@@ -200,6 +208,23 @@ def quantize_multiotsu(
     return np.zeros(X.shape, dtype="int64")
 
 
+def kmeans_fit(
+    X: np.ndarray,
+    k: int,
+    seed: int = DEFAULT_SEED,
+) -> tuple[np.ndarray, np.ndarray]:
+    model = KMeans(
+        n_clusters=k,
+        random_state=seed,
+        n_init=10,  # pyright: ignore[reportArgumentType]
+    )
+
+    with threadpool_limits(limits=1):
+        labels = model.fit_predict(X)
+
+    return labels, model.cluster_centers_
+
+
 def quantize_kmeans(
     X: np.ndarray,
     n_bands: int,
@@ -211,14 +236,9 @@ def quantize_kmeans(
     if k <= 1:
         return np.zeros(X.shape, dtype="int64")
 
-    model = KMeans(
-        n_clusters=k,
-        random_state=seed,
-        n_init=10,
-    )
+    labels, _ = kmeans_fit(X.reshape(-1, 1), k, seed)
 
-    y = model.fit_predict(X.reshape(-1, 1))
-    return y.reshape(X.shape).astype("int64")
+    return labels.reshape(X.shape).astype("int64")
 
 
 def quantize_percentile(
@@ -284,7 +304,7 @@ def despeckle(
     return out.astype("int64")
 
 
-def label2gray(
+def label_ramp(
     labels: np.ndarray,
     n_bands: int | None = None,
 ) -> np.ndarray:

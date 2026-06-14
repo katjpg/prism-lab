@@ -1,24 +1,55 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import cv2
 import numpy as np
 from skimage.color import lab2rgb, rgb2lab
-from sklearn.cluster import KMeans
 
-from prism.color.value import EPS, DEFAULT_SEED, ValueResult, check_rgb
-
-
-PaletteTone = Literal["shadow", "midtone", "highlight"]
+from prism.color.value import DEFAULT_SEED, EPS, ValueResult, check_rgb, kmeans_fit
+from prism.preset import Detail, fit_image
 
 DEFAULT_N_COLORS = 8
 DEFAULT_N_SAMPLES = 20_000
 
-# L* is on a scale of 0-100, where black = 0 and white = 100
-SHADOW_L_MAX = 33.0
-HIGHLIGHT_L_MIN = 66.0
+RECOLOR_SCHEMES: dict[str, list[tuple[float, float, float]]] = {
+    "teal_orange": [
+        (0.04, 0.09, 0.12),
+        (0.18, 0.26, 0.30),
+        (0.55, 0.50, 0.40),
+        (0.92, 0.82, 0.68),
+    ],
+    "bleach": [
+        (0.10, 0.11, 0.12),
+        (0.33, 0.34, 0.35),
+        (0.60, 0.60, 0.60),
+        (0.88, 0.88, 0.88),
+    ],
+    "sepia": [
+        (0.10, 0.07, 0.04),
+        (0.32, 0.24, 0.16),
+        (0.60, 0.48, 0.33),
+        (0.92, 0.82, 0.66),
+    ],
+    "noir": [
+        (0.03, 0.04, 0.07),
+        (0.16, 0.19, 0.25),
+        (0.42, 0.46, 0.52),
+        (0.80, 0.83, 0.87),
+    ],
+    "warm_film": [
+        (0.10, 0.07, 0.05),
+        (0.32, 0.26, 0.20),
+        (0.63, 0.55, 0.44),
+        (0.94, 0.87, 0.74),
+    ],
+    "cool_film": [
+        (0.05, 0.08, 0.12),
+        (0.19, 0.25, 0.31),
+        (0.46, 0.53, 0.60),
+        (0.85, 0.89, 0.94),
+    ],
+}
 
 
 @dataclass
@@ -26,15 +57,6 @@ class PaletteColor:
     rgb: tuple[float, float, float]
     lab: tuple[float, float, float]
     weight: float
-
-    @property
-    def tone(self) -> PaletteTone:
-        L = self.lab[0]
-        if L < SHADOW_L_MAX:
-            return "shadow"
-        if L < HIGHLIGHT_L_MIN:
-            return "midtone"
-        return "highlight"
 
 
 @dataclass
@@ -48,27 +70,25 @@ class Palette:
         n_colors: int = DEFAULT_N_COLORS,
         n_samples: int = DEFAULT_N_SAMPLES,
         seed: int = DEFAULT_SEED,
+        detail: Detail = "standard",
+        pixels: tuple[int, int] | None = None,
     ) -> Palette:
         check_rgb(rgb)
+
+        rgb, _ = fit_image(rgb, detail, pixels)
 
         X = rgb2lab(rgb).reshape(-1, 3)
         Xs = sample_rows(X, n=n_samples, seed=seed)
 
         k = min(n_colors, len(Xs))
 
-        model = KMeans(
-            n_clusters=k,
-            random_state=seed,
-            n_init=10,
-        )
-
-        y = model.fit_predict(Xs)
+        y, centers = kmeans_fit(Xs, k, seed)
         counts = np.bincount(y, minlength=k)
         weights = counts / max(int(counts.sum()), 1)
 
         colors: list[PaletteColor] = []
 
-        for lab, w in zip(model.cluster_centers_, weights):
+        for lab, w in zip(centers, weights):
             rgb_ = lab2rgb(lab.reshape(1, 1, 3)).reshape(3)
             rgb_ = np.clip(rgb_, 0.0, 1.0)
 
@@ -82,9 +102,6 @@ class Palette:
 
         colors.sort(key=lambda c: c.lab[0])
         return cls(colors=colors)
-
-    def by_tone(self, tone: PaletteTone) -> list[PaletteColor]:
-        return [c for c in self.colors if c.tone == tone]
 
     def by_lightness(self) -> list[PaletteColor]:
         return sorted(self.colors, key=lambda c: c.lab[0])
@@ -133,7 +150,7 @@ def recolor(
     rgb: np.ndarray,
     value: ValueResult,
     anchors: list[tuple[float, float, float]],
-    tone: float = 0.4,
+    amount: float = 0.4,
     chroma: float = 1.2,
     sigma: float = 6.0,
 ) -> np.ndarray:
@@ -157,25 +174,7 @@ def recolor(
     lab = rgb2lab(rgb)
 
     # preserve original Lab L*.
-    lab[..., 1] = (1.0 - tone) * lab[..., 1] + tone * a_t
-    lab[..., 2] = (1.0 - tone) * lab[..., 2] + tone * b_t
+    lab[..., 1] = (1.0 - amount) * lab[..., 1] + amount * a_t
+    lab[..., 2] = (1.0 - amount) * lab[..., 2] + amount * b_t
 
     return np.clip(lab2rgb(lab), 0.0, 1.0).astype("float32")
-
-
-def swatch(
-    palette: Palette,
-    tone: PaletteTone | None = None,
-) -> np.ndarray:
-    colors = palette.colors if tone is None else palette.by_tone(tone)
-    colors = sorted(colors, key=lambda c: c.lab[0])
-
-    if not colors:
-        return np.zeros((1, 1, 3), dtype="float32")
-
-    bar = np.zeros((1, len(colors), 3), dtype="float32")
-
-    for i, c in enumerate(colors):
-        bar[0, i] = c.rgb
-
-    return bar
