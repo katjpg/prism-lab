@@ -1,41 +1,37 @@
-from prism.form.geometric import (
+from prism.raster.geometric import (
     PrimitiveFit,
     Shape,
     fit_primitives,
     render_primitives,
 )
-from prism.form.region import (
-    RegionMap,
-    mean_color_by_region,
-    mean_value_by_region,
+from prism.raster.region import (
+    BoundaryMap,
+    mean_color_by_label,
+    mean_value_by_label,
     region_labels,
     region_map,
     superpixels,
     watershed_regions,
 )
-from prism.form.stipple import (
+from prism.raster.stipple import (
     StippleMap,
     render_stipple,
     stipple,
 )
-from prism.form.tonal import (
+from prism.raster.tonal import (
     ValueMap,
-    mean_color_by_value,
-    preprocess_rgb,
     quantize_value,
 )
 
 __all__ = [
     "PrimitiveFit",
-    "RegionMap",
+    "BoundaryMap",
     "Shape",
     "StippleMap",
     "ValueMap",
     "fit_primitives",
-    "mean_color_by_region",
-    "mean_color_by_value",
-    "mean_value_by_region",
-    "preprocess_rgb",
+    "mean_color_by_label",
+    "mean_value_by_label",
     "quantize_value",
     "region_labels",
     "region_map",

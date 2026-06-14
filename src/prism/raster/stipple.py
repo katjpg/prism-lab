@@ -8,18 +8,24 @@ from numba import njit
 from scipy.spatial import cKDTree  # type: ignore
 
 from prism.color.value import DEFAULT_SEED, value_channel
-
+from prism.preset import Detail, fit_pixels, fit_side, preset
 
 EPS = 1e-12
 
 DEFAULT_N_POINTS = 8_000
-DEFAULT_N_STEPS = 20
 DEFAULT_GAMMA = 1.4
-DEFAULT_WORK_MAX_SIDE = 450
 DEFAULT_DOT_RADIUS = 0.75
 DEFAULT_EDGE_WEIGHT = 0.35
 DEFAULT_WHITE_CUTOFF = 0.08
 DEFAULT_SMOOTH = 0.6
+
+RELAX_STEPS: dict[Detail, int] = {"draft": 10, "standard": 18, "high": 26, "ultra": 40}
+POINT_SCALE: dict[Detail, float] = {
+    "draft": 0.7,
+    "standard": 1.3,
+    "high": 2.0,
+    "ultra": 3.0,
+}
 
 
 @dataclass
@@ -32,9 +38,9 @@ class StippleMap:
 def stipple(
     target: np.ndarray,
     n_points: int = DEFAULT_N_POINTS,
+    detail: Detail = "standard",
+    pixels: tuple[int, int] | None = None,
     gamma: float = DEFAULT_GAMMA,
-    n_steps: int = DEFAULT_N_STEPS,
-    work_size: int = DEFAULT_WORK_MAX_SIDE,
     smooth: float = DEFAULT_SMOOTH,
     dot_radius: float = DEFAULT_DOT_RADIUS,
     edge_weight: float = DEFAULT_EDGE_WEIGHT,
@@ -48,13 +54,17 @@ def stipple(
     if gamma <= 0:
         raise ValueError("gamma must be positive")
 
-    if n_steps < 0:
-        raise ValueError("n_steps must be non-negative")
+    pset = preset(detail)
+    n_steps = RELAX_STEPS[detail]
+    n_points = max(1, round(n_points * POINT_SCALE[detail]))
+
+    if pixels is not None:
+        target, _ = fit_pixels(target, pixels)
 
     value = image_value(target)
 
     h0, w0 = value.shape
-    work_value, scale = resize_max_side(value, work_size)
+    work_value, scale = fit_side(value, pset.side)
 
     if smooth > 0:
         work_value = cv2.GaussianBlur(
@@ -119,9 +129,7 @@ def image_value(target: np.ndarray) -> np.ndarray:
     elif target.ndim == 3 and target.shape[-1] == 3:
         value = value_channel(target.astype("float32"))
     else:
-        raise ValueError(
-            f"expected image with shape (H, W) or (H, W, 3), got {target.shape}"
-        )
+        raise ValueError(f"expected image with shape (H, W) or (H, W, 3), got {target.shape}")
 
     if not np.isfinite(value).all():
         raise ValueError("target contains non-finite values")
@@ -157,29 +165,6 @@ def density_from_value(
         return np.ones(value.shape, dtype="float32")
 
     return density.astype("float32")
-
-
-def resize_max_side(
-    image: np.ndarray,
-    max_side: int,
-) -> tuple[np.ndarray, float]:
-    h, w = image.shape[:2]
-
-    if max_side <= 0 or max(h, w) <= max_side:
-        return image.astype("float32"), 1.0
-
-    scale_down = max_side / max(h, w)
-    hh = max(1, round(h * scale_down))
-    ww = max(1, round(w * scale_down))
-
-    out = cv2.resize(
-        image.astype("float32"),
-        (ww, hh),
-        interpolation=cv2.INTER_AREA,
-    )
-
-    scale_up = max(h, w) / max(hh, ww)
-    return out.astype("float32"), float(scale_up)
 
 
 def grid_coords(shape_hw: tuple[int, int]) -> np.ndarray:
@@ -378,7 +363,6 @@ __all__ = [
     "nearest_points",
     "relax_points",
     "render_stipple",
-    "resize_max_side",
     "sample_points",
     "scale_points",
     "stipple",

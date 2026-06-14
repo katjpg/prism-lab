@@ -9,9 +9,9 @@ from skimage.filters import sobel
 from skimage.segmentation import mark_boundaries, slic, watershed
 
 from prism.color.value import value_channel
+from prism.preset import Detail, fit_image
 
-
-RegionMode = Literal["boundaries", "value", "color"]
+RegionFill = Literal["boundaries", "value", "color"]
 RegionMethod = Literal["slic", "watershed"]
 
 DEFAULT_N_SEGMENTS = 600
@@ -23,7 +23,7 @@ DEFAULT_WATERSHED_COMPACTNESS = 0.001
 
 
 @dataclass
-class RegionMap:
+class BoundaryMap:
     image: np.ndarray
     labels: np.ndarray
 
@@ -89,7 +89,7 @@ def region_labels(
     raise ValueError(f"unknown region method: {method!r}")
 
 
-def mean_value_by_region(
+def mean_value_by_label(
     labels: np.ndarray,
     value: np.ndarray,
 ) -> np.ndarray:
@@ -106,7 +106,7 @@ def mean_value_by_region(
     return np.asarray((sums / counts)[labels], dtype="float32")
 
 
-def mean_color_by_region(
+def mean_color_by_label(
     labels: np.ndarray,
     rgb: np.ndarray,
 ) -> np.ndarray:
@@ -135,14 +135,18 @@ def mean_color_by_region(
 
 def region_map(
     rgb: np.ndarray,
-    mode: RegionMode = "value",
+    fill: RegionFill = "value",
     method: RegionMethod = "slic",
     n_segments: int = DEFAULT_N_SEGMENTS,
     compactness: float = DEFAULT_COMPACTNESS,
     smooth: float = DEFAULT_SMOOTH,
     markers: int = DEFAULT_WATERSHED_MARKERS,
     watershed_compactness: float = DEFAULT_WATERSHED_COMPACTNESS,
-) -> RegionMap:
+    detail: Detail = "standard",
+    pixels: tuple[int, int] | None = None,
+) -> BoundaryMap:
+    rgb, _ = fit_image(rgb, detail, pixels)
+
     labels = region_labels(
         rgb,
         method=method,
@@ -153,27 +157,27 @@ def region_map(
         watershed_compactness=watershed_compactness,
     )
 
-    if mode == "boundaries":
+    if fill == "boundaries":
         image = np.asarray(
             mark_boundaries(rgb, labels, color=(1, 0, 0)),
             dtype="float32",
         )
-    elif mode == "value":
-        image = mean_value_by_region(labels, value_channel(rgb))
-    elif mode == "color":
-        image = mean_color_by_region(labels, rgb)
+    elif fill == "value":
+        image = mean_value_by_label(labels, value_channel(rgb))
+    elif fill == "color":
+        image = mean_color_by_label(labels, rgb)
     else:
-        raise ValueError(f"unknown region mode: {mode!r}")
+        raise ValueError(f"unknown region fill: {fill!r}")
 
-    return RegionMap(image=image, labels=labels)
+    return BoundaryMap(image=image, labels=labels)
 
 
 __all__ = [
-    "RegionMap",
+    "BoundaryMap",
     "RegionMethod",
-    "RegionMode",
-    "mean_color_by_region",
-    "mean_value_by_region",
+    "RegionFill",
+    "mean_color_by_label",
+    "mean_value_by_label",
     "region_labels",
     "region_map",
     "superpixels",
