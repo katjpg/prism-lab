@@ -1,7 +1,7 @@
 [project]
 name = "prism-lab"
 version = "0.1.0"
-description = "A computational toolkit for image processing and perceptual analysis of art."
+description = "A Computational Toolkit for Painterly Rendering"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
